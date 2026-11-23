@@ -2,6 +2,8 @@
 
 用法：python scripts/demo.py [base_url]
 默认 http://127.0.0.1:8000
+
+演示内容与 /docs（Swagger UI）中的操作一一对应，可直接照点在页面上演练。
 """
 
 import json
@@ -75,16 +77,43 @@ def main() -> int:
         "seg_start": 90, "seg_end": 120})
     call("GET", "/batches/B-DEMO/reconcile")
 
-    # 9. 十亿级号段：存储与计算均不逐帧展开
+    # 9. 修复场景：同侧清单连成一片时，撤回一张只登记一帧的清单
+    #    采集端 1..99 连成一片，C-ONE 是唯一覆盖第 50 帧的清单
+    call("POST", "/batches", {"batch_id": "B-FIX", "frame_start": 1, "frame_end": 100})
+    call("POST", "/manifests", {
+        "manifest_no": "C-A", "batch_id": "B-FIX", "side": "collector",
+        "seg_start": 1, "seg_end": 49})
+    call("POST", "/manifests", {
+        "manifest_no": "C-B", "batch_id": "B-FIX", "side": "collector",
+        "seg_start": 51, "seg_end": 100})
+    call("POST", "/manifests", {
+        "manifest_no": "C-ONE", "batch_id": "B-FIX", "side": "collector",
+        "seg_start": 50, "seg_end": 50})
+    call("POST", "/manifests", {
+        "manifest_no": "L-FULL", "batch_id": "B-FIX", "side": "library",
+        "seg_start": 1, "seg_end": 100})
+    #    撤回一帧清单 -> 只触及第 50 帧所在的覆盖段，核对出现单帧缺口
+    call("POST", "/manifests/withdraw", {"manifest_no": "C-ONE"})
+    call("GET", "/batches/B-FIX/reconcile")
+
+    # 10. 修复场景：清单移到远处，跳过两段之间的无关记录
+    #     C-FAR 从 60 移到 10 亿外，中间隔着的连片清单不被读写
     call("POST", "/batches", {
-        "batch_id": "B-BIG", "frame_start": 0, "frame_end": 2_000_000_000})
+        "batch_id": "B-MOVE", "frame_start": 0, "frame_end": 2_000_000_000})
     call("POST", "/manifests", {
-        "manifest_no": "BC-1", "batch_id": "B-BIG", "side": "collector",
-        "seg_start": 0, "seg_end": 1_999_999_999})
+        "manifest_no": "C-GAP", "batch_id": "B-MOVE", "side": "collector",
+        "seg_start": 100, "seg_end": 1_999_999_999})
     call("POST", "/manifests", {
-        "manifest_no": "BL-1", "batch_id": "B-BIG", "side": "library",
+        "manifest_no": "C-FAR", "batch_id": "B-MOVE", "side": "collector",
+        "seg_start": 60, "seg_end": 60})
+    call("PUT", "/manifests/C-FAR", {"seg_start": 2_000_000_000, "seg_end": 2_000_000_000})
+    call("GET", "/batches/B-MOVE/reconcile")
+
+    # 11. 十亿级号段：存储与计算均不逐帧展开
+    call("POST", "/manifests", {
+        "manifest_no": "L-WIDE", "batch_id": "B-MOVE", "side": "library",
         "seg_start": 1, "seg_end": 2_000_000_000})
-    call("GET", "/batches/B-BIG/reconcile")
+    call("GET", "/batches/B-MOVE/reconcile")
     print("== 演示完成 ==")
     return 0
 

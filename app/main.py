@@ -8,7 +8,7 @@ from typing import Annotated, Literal, Optional
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
-from . import db, intervals
+from . import db
 
 Side = Literal["collector", "library"]
 
@@ -165,8 +165,8 @@ def register_manifest(payload: ManifestIn, conn=Depends(get_conn)):
             payload.seg_start,
             payload.seg_end,
         )
-        # 只刷新该号段所在的局部区间
-        db.refresh_region(
+        # 覆盖步进段 +1：只读写与该号段相交的段及并段边界
+        db.coverage_add(
             conn, payload.batch_id, payload.side, payload.seg_start, payload.seg_end
         )
         row = db.get_manifest(conn, payload.manifest_no)
@@ -175,7 +175,7 @@ def register_manifest(payload: ManifestIn, conn=Depends(get_conn)):
 
 @app.put("/manifests/{manifest_no}", tags=["清单"])
 def correct_manifest(manifest_no: str, payload: CorrectionIn, conn=Depends(get_conn)):
-    """更正清单号段：只更新旧号段与新号段涉及的区间，不重扫整批。"""
+    """更正清单号段：旧段 -1、新段 +1，两段之间的无关记录不被读写。"""
     with db.transaction(conn):
         row = db.get_manifest(conn, manifest_no)
         if row is None:
@@ -184,13 +184,10 @@ def correct_manifest(manifest_no: str, payload: CorrectionIn, conn=Depends(get_c
             raise HTTPException(409, f"清单已撤回，不能更正: {manifest_no}")
         _validate_in_batch(conn, row["batch_id"], payload.seg_start, payload.seg_end)
 
-        affected = intervals.merge(
-            [(row["seg_start"], row["seg_end"]), (payload.seg_start, payload.seg_end)]
-        )
+        # 先撤旧号段，再登新号段；各自只触及与号段相交的覆盖段
+        db.coverage_remove(conn, row["batch_id"], row["side"], row["seg_start"], row["seg_end"])
         db.update_manifest_segment(conn, manifest_no, payload.seg_start, payload.seg_end)
-        # 受影响区间可能是多段（新旧不相邻），逐段局部重建
-        for start, end in affected:
-            db.refresh_region(conn, row["batch_id"], row["side"], start, end)
+        db.coverage_add(conn, row["batch_id"], row["side"], payload.seg_start, payload.seg_end)
         row = db.get_manifest(conn, manifest_no)
     return _row_to_manifest(row)
 
@@ -205,8 +202,8 @@ def withdraw_manifest(payload: WithdrawIn, conn=Depends(get_conn)):
         if row["status"] == "withdrawn":
             raise HTTPException(409, f"清单已撤回: {payload.manifest_no}")
         db.mark_manifest_withdrawn(conn, payload.manifest_no)
-        # 仅在原号段区间内重算覆盖
-        db.refresh_region(
+        # 仅在原号段上 -1：同侧其他清单覆盖的帧计数仍 >= 1，继续算有记录
+        db.coverage_remove(
             conn, row["batch_id"], row["side"], row["seg_start"], row["seg_end"]
         )
         row = db.get_manifest(conn, payload.manifest_no)
